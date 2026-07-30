@@ -278,6 +278,13 @@ yansi = "1.0"
 zeroize = { version = "1.5", features = ["zeroize_derive"] }
 zstd = "0.13"
 
+# Incident-response override pinned to the reviewed MASP verifier fix.
+# Replace this commit with the corresponding immutable release once published.
+[patch.crates-io]
+masp_note_encryption = { git = "https://github.com/namada-net/masp", rev = "ca0046f2e1c4520e95d3711a574cb7dfc44a92b5" }
+masp_primitives = { git = "https://github.com/namada-net/masp", rev = "ca0046f2e1c4520e95d3711a574cb7dfc44a92b5" }
+masp_proofs = { git = "https://github.com/namada-net/masp", rev = "ca0046f2e1c4520e95d3711a574cb7dfc44a92b5" }
+
 [profile.release]
 lto = true
 opt-level = 3

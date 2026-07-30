@@ -27,13 +27,14 @@ use namada_state::{
 };
 use namada_systems::{governance, ibc, parameters, trans_token};
 use namada_tx::BatchedTxRef;
+use namada_vp_env::StorageRead;
 use namada_vp_env::{Error, Result, VpEnv};
 
 use crate::storage_key::{
     is_masp_key, is_masp_nullifier_key, is_masp_transfer_key,
     is_masp_undated_balance_key, masp_commitment_anchor_key,
     masp_commitment_tree_key, masp_convert_anchor_key, masp_nullifier_key,
-    masp_undated_balance_key,
+    masp_recovery_mode_key, masp_undated_balance_key,
 };
 use crate::validation::verify_shielded_tx;
 
@@ -430,6 +431,10 @@ where
         )
         .map_err(Error::new_const)?;
         let conversion_state = ctx.conversion_state();
+        let recovery_mode = ctx
+            .read_pre::<bool>(&masp_recovery_mode_key())?
+            .unwrap_or(false);
+        let native_token = ctx.pre().get_native_token()?;
         let tx_data = batched_tx
             .tx
             .data(batched_tx.cmt)
@@ -467,6 +472,11 @@ where
             tracing::debug!("{error}");
             return Err(error);
         }
+
+        let has_converts = shielded_tx
+            .sapling_bundle()
+            .is_some_and(|bundle| !bundle.shielded_converts.is_empty());
+        ensure_recovery_converts_allowed(has_converts, recovery_mode)?;
 
         // Check the validity of the keys and get the transfer data
         let changed_balances = Self::validate_state_and_get_transfer_data(
@@ -519,6 +529,8 @@ where
             masp_epoch,
             conversion_state,
             &mut authorizers,
+            recovery_mode,
+            &native_token,
         )?;
 
         // Ensure that every account for which balance has gone down as a result
@@ -663,6 +675,8 @@ fn validate_transparent_input<A: Authorization>(
     epoch: MaspEpoch,
     conversion_state: &ConversionState,
     authorizers: &mut BTreeSet<TransparentAddress>,
+    recovery_mode: bool,
+    native_token: &Address,
 ) -> Result<()> {
     // A decrease in the balance of an account needs to be
     // authorized by the account of this transparent input
@@ -687,6 +701,11 @@ fn validate_transparent_input<A: Authorization>(
         // transaction for they would then be able to claim rewards while
         // locking their assets for negligible time periods.
         Some(asset) if asset.epoch == epoch => {
+            ensure_recovery_token_allowed(
+                &asset.token,
+                native_token,
+                recovery_mode,
+            )?;
             let amount = token::Amount::from_masp_denominated(
                 vin.value,
                 asset.digit_pos,
@@ -704,6 +723,7 @@ fn validate_transparent_input<A: Authorization>(
         {
             let (token, denom, digit) =
                 &changed_balances.undated_tokens[&vin.asset_type];
+            ensure_recovery_token_allowed(token, native_token, recovery_mode)?;
             // Determine what the asset type would be if it were dated
             let dated_asset_type =
                 encode_asset_type(token.clone(), *denom, *digit, Some(epoch))
@@ -754,6 +774,8 @@ fn validate_transparent_output(
     transparent_tx_pool: &mut I128Sum,
     epoch: MaspEpoch,
     conversion_state: &ConversionState,
+    recovery_mode: bool,
+    native_token: &Address,
 ) -> Result<()> {
     // Non-masp destinations subtract from transparent tx pool
     *transparent_tx_pool = transparent_tx_pool
@@ -771,6 +793,11 @@ fn validate_transparent_output(
 
     match conversion_state.assets.get(&out.asset_type) {
         Some(asset) if asset.epoch <= epoch => {
+            ensure_recovery_token_allowed(
+                &asset.token,
+                native_token,
+                recovery_mode,
+            )?;
             let amount = token::Amount::from_masp_denominated(
                 out.value,
                 asset.digit_pos,
@@ -789,6 +816,7 @@ fn validate_transparent_output(
             // Otherwise note the contribution to this transparent output
             let (token, _denom, digit) =
                 &changed_balances.undated_tokens[&out.asset_type];
+            ensure_recovery_token_allowed(token, native_token, recovery_mode)?;
             let amount =
                 token::Amount::from_masp_denominated(out.value, *digit);
             *bal_ref = bal_ref
@@ -817,6 +845,8 @@ fn validate_transparent_bundle(
     epoch: MaspEpoch,
     conversion_state: &ConversionState,
     authorizers: &mut BTreeSet<TransparentAddress>,
+    recovery_mode: bool,
+    native_token: &Address,
 ) -> Result<()> {
     // The Sapling value balance adds to the transparent tx pool
     let mut transparent_tx_pool = shielded_tx.sapling_value_balance();
@@ -830,6 +860,8 @@ fn validate_transparent_bundle(
                 epoch,
                 conversion_state,
                 authorizers,
+                recovery_mode,
+                native_token,
             )?;
         }
 
@@ -840,6 +872,8 @@ fn validate_transparent_bundle(
                 &mut transparent_tx_pool,
                 epoch,
                 conversion_state,
+                recovery_mode,
+                native_token,
             )?;
         }
     }
@@ -866,6 +900,33 @@ fn validate_transparent_bundle(
         }
         _ => Ok(()),
     }
+}
+
+fn ensure_recovery_token_allowed(
+    token: &Address,
+    native_token: &Address,
+    recovery_mode: bool,
+) -> Result<()> {
+    if !recovery_mode || token == native_token {
+        return Ok(());
+    }
+
+    Err(Error::new_const(
+        "MASP recovery mode only permits transparent native token transfers",
+    ))
+}
+
+fn ensure_recovery_converts_allowed(
+    has_converts: bool,
+    recovery_mode: bool,
+) -> Result<()> {
+    if !recovery_mode || !has_converts {
+        return Ok(());
+    }
+
+    Err(Error::new_const(
+        "MASP recovery mode does not permit conversion descriptions",
+    ))
 }
 
 // Apply the given Sapling value balance component to the accumulator
@@ -955,7 +1016,7 @@ mod shielded_token_tests {
     use std::collections::BTreeSet;
 
     use namada_core::address::MASP;
-    use namada_core::address::testing::nam;
+    use namada_core::address::testing::{established_address_1, nam};
     use namada_core::borsh::BorshSerializeExt;
     use namada_gas::{GasMeterKind, TxGasMeter, VpGasMeter};
     use namada_state::testing::{TestState, arb_account_storage_key, arb_key};
@@ -996,6 +1057,41 @@ mod shielded_token_tests {
         >,
         (),
     >;
+
+    #[test]
+    fn recovery_mode_only_allows_native_transparent_transfers() {
+        let native_token = nam();
+        let ibc_token = established_address_1();
+
+        assert!(
+            super::ensure_recovery_token_allowed(
+                &native_token,
+                &native_token,
+                true,
+            )
+            .is_ok()
+        );
+        assert!(
+            super::ensure_recovery_token_allowed(
+                &ibc_token,
+                &native_token,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            super::ensure_recovery_token_allowed(
+                &ibc_token,
+                &native_token,
+                true,
+            )
+            .is_err()
+        );
+
+        assert!(super::ensure_recovery_converts_allowed(false, true).is_ok());
+        assert!(super::ensure_recovery_converts_allowed(true, false).is_ok());
+        assert!(super::ensure_recovery_converts_allowed(true, true).is_err());
+    }
 
     // Changing only the balance key of the MASP is invalid
     #[test]

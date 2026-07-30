@@ -17,6 +17,8 @@ const BALANCE_STORAGE_KEY: &str = "balance";
 pub const MASP_NULLIFIERS_KEY: &str = "nullifiers";
 /// The key for the masp reward balance
 pub const MASP_UNDATED_BALANCE_KEY: &str = "undated_balance";
+/// The key that limits transparent MASP transfers to the native token.
+pub const MASP_RECOVERY_MODE_KEY: &str = "recovery_mode";
 /// Key segment prefix for the conversions
 pub const MASP_CONVERSIONS_KEY: &str = "conversions";
 /// Key segment prefix for the scheduled reward precisions
@@ -226,10 +228,20 @@ pub fn is_masp_key(key: &storage::Key) -> bool {
 /// proposal
 pub fn is_masp_governance_key(key: &storage::Key) -> bool {
     is_masp_token_map_key(key)
+        || is_masp_recovery_mode_key(key)
         || is_masp_conversion_key(key).is_some()
         || is_masp_scheduled_reward_precision_key(key).is_some()
         || is_masp_base_native_precision_key(key)
         || is_masp_scheduled_base_native_precision_key(key).is_some()
+}
+
+/// Check if the given storage key is the MASP recovery mode key.
+pub fn is_masp_recovery_mode_key(key: &storage::Key) -> bool {
+    matches!(
+        &key.segments[..],
+        [DbKeySeg::AddressSeg(addr), DbKeySeg::StringSeg(key)]
+            if *addr == address::MASP && key == MASP_RECOVERY_MODE_KEY
+    )
 }
 
 /// Check if the given storage key is allowed to be touched by a masp transfer
@@ -342,6 +354,13 @@ pub fn masp_conversion_key_prefix(ep: &MaspEpoch) -> storage::Key {
 pub fn masp_commitment_tree_key() -> storage::Key {
     storage::Key::from(address::MASP.to_db_key())
         .push(&MASP_NOTE_COMMITMENT_TREE_KEY.to_owned())
+        .expect("Cannot obtain a storage key")
+}
+
+/// Get the key that enables native-token-only MASP recovery mode.
+pub fn masp_recovery_mode_key() -> storage::Key {
+    storage::Key::from(address::MASP.to_db_key())
+        .push(&MASP_RECOVERY_MODE_KEY.to_owned())
         .expect("Cannot obtain a storage key")
 }
 

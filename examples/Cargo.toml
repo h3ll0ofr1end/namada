@@ -28,6 +28,10 @@ path = "tx_schema.rs"
 name = "make-db-migration"
 path = "make-db-migration.rs"
 
+[[example]]
+name = "make-masp-recovery-migration"
+path = "make-masp-recovery-migration.rs"
+
 [features]
 default = ["migrations"]
 migrations = []
